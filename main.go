@@ -1,6 +1,6 @@
 // To run this linter
 // Option 1:
-// go build main.go
+// go build main.go control.go
 // ./main ../counter/
 // Option 2:
 // go install .
