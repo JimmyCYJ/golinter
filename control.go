@@ -44,8 +44,7 @@ type TestFileFilter func(os.FileInfo) bool
 
 // unitTestFileFilter filters unit test files.
 func unitTestFileFilter(info os.FileInfo) bool {
-	if !info.IsDir() && strings.HasSuffix(info.Name(), ".go") &&
-			strings.HasSuffix(info.Name(), "_test.go") &&
+	if strings.HasSuffix(info.Name(), "_test.go") &&
 			!strings.HasSuffix(info.Name(), "_integ_test.go") {
 		return true
 	}
@@ -54,8 +53,7 @@ func unitTestFileFilter(info os.FileInfo) bool {
 
 // integTestFileFilter filters integration test files.
 func integTestFileFilter(info os.FileInfo) bool {
-	if !info.IsDir() && strings.HasSuffix(info.Name(), ".go") &&
-			strings.HasSuffix(info.Name(), "_integ_test.go") {
+	if strings.HasSuffix(info.Name(), "_integ_test.go") {
 		return true
 	}
 	return false
@@ -63,8 +61,7 @@ func integTestFileFilter(info os.FileInfo) bool {
 
 // e2eTestFileFilter filters unit test files.
 func e2eTestFileFilter(info os.FileInfo) bool {
-	if !info.IsDir() && strings.HasSuffix(info.Name(), ".go") &&
-			strings.HasSuffix(info.Name(), "_test.go") {
+	if strings.HasSuffix(info.Name(), "_test.go") {
 		return true
 	}
 	return false
