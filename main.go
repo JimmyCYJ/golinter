@@ -16,7 +16,9 @@ import (
 	"go/token"
 	"log"
 	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 )
 
 var exitCode int
@@ -44,8 +46,26 @@ func doAllDirs(args []string) []string {
 	for _, name := range args {
 		// Is it a directory?
 		if fi, err := os.Stat(name); err == nil && fi.IsDir() {
-			for _, r := range doDir(name) {
-				reports = append(reports, r.msg)
+			err := filepath.Walk(name, func(path string, info os.FileInfo, err error) error {
+				if err != nil {
+					reportErr(fmt.Sprintf("prevent panic by handling failure accessing a path %q: %v\n", path, err))
+					return err
+				}
+				if info.IsDir() {
+					if strings.HasSuffix(info.Name(), "e2e") {
+						for _, r := range doE2eDir(path) {
+							reports = append(reports, r.msg)
+						}
+					} else {
+						for _, r := range doDir(path) {
+							reports = append(reports, r.msg)
+						}
+					}
+				}
+				return nil
+			})
+			if err != nil {
+				reportErr(fmt.Sprintf("error walking the path %q: %v", name, err))
 			}
 		} else {
 			reportErr(fmt.Sprintf("not a directory: %s", name))
@@ -54,15 +74,20 @@ func doAllDirs(args []string) []string {
 	return reports
 }
 
-func doDir(name string) reports {
-	rpts := testReportsByType(name, UnitTest)
-	rpts = append(rpts, testReportsByType(name, IntegTest)...)
+func doDir(path string) reports {
+	rpts := testReportsByType(path, UnitTest)
+	rpts = append(rpts, testReportsByType(path, IntegTest)...)
 	return rpts
 }
 
-func testReportsByType(name string, testTypeID TestType) reports {
+func doE2eDir(path string) reports {
+	rpts := testReportsByType(path, E2eTest)
+	return rpts
+}
+
+func testReportsByType(path string, testTypeID TestType) reports {
 	fs := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fs, name, TestFileFilters[testTypeID], parser.Mode(0))
+	pkgs, err := parser.ParseDir(fs, path, TestFileFilters[testTypeID], parser.Mode(0))
 	if err != nil {
 		reportErr(fmt.Sprintf("%v", err))
 		return nil
@@ -79,22 +104,27 @@ func doPackage(fs *token.FileSet, pkg *ast.Package, testTypeID TestType) reports
 	v := newVisitor(fs, testTypeID)
 	switch testTypeID {
 	case UnitTest:
-		scanUnitTest(&v, pkg)
+		scanForbiddenFunctionCallInTest(&v, pkg)
 	case IntegTest:
-		scanIntegTest(&v, pkg)
+		scanMandatoryFunctionCallInTest(&v, pkg)
+	case E2eTest:
+		scanMandatoryFunctionCallInTest(&v, pkg)
 	default:
 		log.Printf("Test type is invalid %d", testTypeID)
 	}
 	return v.reports
 }
 
-func scanUnitTest(v *visitor, pkg *ast.Package) {
+// scanForbiddenFunctionCallInTest scans tests and checks forbidden function call.
+func scanForbiddenFunctionCallInTest(v *visitor, pkg *ast.Package) {
 	for _, file := range pkg.Files {
 		ast.Walk(v, file)
 	}
 }
 
-func scanIntegTest(v *visitor, pkg *ast.Package) {
+// scanMandatoryFunctionCallInTest scans tests and checks if mandatory function call is placed at
+// the beginning of each test.
+func scanMandatoryFunctionCallInTest(v *visitor, pkg *ast.Package) {
 	for _, file := range pkg.Files {
 		testFuncs := []*ast.FuncDecl{}
 		for _, d := range file.Decls {
@@ -102,16 +132,18 @@ func scanIntegTest(v *visitor, pkg *ast.Package) {
 				testFuncs = append(testFuncs, fn)
 			}
 		}
+		// Checks each test function named TestXxx.
 		for _, function := range testFuncs {
 			// log.Printf("-- function %s", function.Name.String())
-			if !extractIntegTestCall(function.Body.List[0]) {
-				v.reports = append(v.reports, v.integTestCheckReport(file.Pos(), function))
+			if !hasMandatoryCall(function.Body.List[0]) {
+				v.reports = append(v.reports, v.missingMandatoryCallReport(file.Pos(), function))
 			}
 		}
 	}
 }
 
-func extractIntegTestCall(stmt ast.Stmt) bool {
+// hasMandatoryCall examines the mandatory function call in a function of the form TestXxx.
+func hasMandatoryCall(stmt ast.Stmt) bool {
 	hasShortAtTop := false
 	hasSkipAtTop := false
 	if ifStmt, ok := stmt.(*ast.IfStmt); ok {
@@ -143,7 +175,7 @@ func extractIntegTestCall(stmt ast.Stmt) bool {
 	return hasShortAtTop && hasSkipAtTop
 }
 
-func (v *visitor) integTestCheckReport(pos token.Pos, testFunc *ast.FuncDecl) report {
+func (v *visitor) missingMandatoryCallReport(pos token.Pos, testFunc *ast.FuncDecl) report {
 	return report{
 		pos,
 		fmt.Sprintf("%v:%v:%v:%s %s %s",
@@ -182,7 +214,7 @@ func (v *visitor) Visit(node ast.Node) ast.Visitor {
 	if ok {
 		for _, utci := range UnitTestCheckList {
 			if isInvalidCall(ce.Fun, utci) {
-				v.reports = append(v.reports, v.unitTestCheckReport(ce.Pos(), utci))
+				v.reports = append(v.reports, v.invalidCallReport(ce.Pos(), utci))
 			}
 		}
 	}
@@ -200,7 +232,7 @@ func isIdent(expr ast.Expr, ident string) bool {
 	return ok && id.Name == ident
 }
 
-func (v *visitor) unitTestCheckReport(pos token.Pos, utci UnitTestCheckItem) report {
+func (v *visitor) invalidCallReport(pos token.Pos, utci UnitTestCheckItem) report {
 	return report{
 		pos,
 		fmt.Sprintf("%v:%v:%v:%s",
