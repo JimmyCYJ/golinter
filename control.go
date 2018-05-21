@@ -45,7 +45,7 @@ type TestFileFilter func(os.FileInfo) bool
 // unitTestFileFilter filters unit test files.
 func unitTestFileFilter(info os.FileInfo) bool {
 	if strings.HasSuffix(info.Name(), "_test.go") &&
-			!strings.HasSuffix(info.Name(), "_integ_test.go") {
+	   !strings.HasSuffix(info.Name(), "_integ_test.go") {
 		return true
 	}
 	return false
