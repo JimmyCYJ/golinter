@@ -14,9 +14,9 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"log"
 	"os"
 	"sort"
-	"strings"
 )
 
 var exitCode int
@@ -55,44 +55,117 @@ func doAllDirs(args []string) []string {
 }
 
 func doDir(name string) reports {
-	testfiles := func(info os.FileInfo) bool {
-		if !info.IsDir() && strings.HasSuffix(info.Name(), ".go") &&
-			strings.HasSuffix(info.Name(), "_test.go") {
-			return true
-		}
-		return false
-	}
+	rpts := testReportsByType(name, UnitTest)
+	rpts = append(rpts, testReportsByType(name, IntegTest)...)
+	return rpts
+}
+
+func testReportsByType(name string, testTypeID TestType) reports {
 	fs := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fs, name, testfiles, parser.Mode(0))
+	pkgs, err := parser.ParseDir(fs, name, TestFileFilters[testTypeID], parser.Mode(0))
 	if err != nil {
 		reportErr(fmt.Sprintf("%v", err))
 		return nil
 	}
 	rpts := make(reports, 0)
 	for _, pkg := range pkgs {
-		rpts = append(rpts, doPackage(fs, pkg)...)
+		rpts = append(rpts, doPackage(fs, pkg, testTypeID)...)
 	}
 	sort.Sort(rpts)
 	return rpts
 }
 
-func doPackage(fs *token.FileSet, pkg *ast.Package) reports {
-	v := newVisitor(fs)
-	for _, file := range pkg.Files {
-		ast.Walk(&v, file)
+func doPackage(fs *token.FileSet, pkg *ast.Package, testTypeID TestType) reports {
+	v := newVisitor(fs, testTypeID)
+	switch testTypeID {
+	case UnitTest:
+		scanUnitTest(&v, pkg)
+	case IntegTest:
+		scanIntegTest(&v, pkg)
+	default:
+		log.Printf("Test type is invalid %d", testTypeID)
 	}
 	return v.reports
 }
 
-func newVisitor(fs *token.FileSet) visitor {
+func scanUnitTest(v *visitor, pkg *ast.Package) {
+	for _, file := range pkg.Files {
+		ast.Walk(v, file)
+	}
+}
+
+func scanIntegTest(v *visitor, pkg *ast.Package) {
+	for _, file := range pkg.Files {
+		testFuncs := []*ast.FuncDecl{}
+		for _, d := range file.Decls {
+			if fn, isFn := d.(*ast.FuncDecl); isFn {
+				testFuncs = append(testFuncs, fn)
+			}
+		}
+		for _, function := range testFuncs {
+			// log.Printf("-- function %s", function.Name.String())
+			if !extractIntegTestCall(function.Body.List[0]) {
+				v.reports = append(v.reports, v.integTestCheckReport(file.Pos(), function))
+			}
+		}
+	}
+}
+
+func extractIntegTestCall(stmt ast.Stmt) bool {
+	hasShortAtTop := false
+	hasSkipAtTop := false
+	if ifStmt, ok := stmt.(*ast.IfStmt); ok {
+		if call, ok := ifStmt.Cond.(*ast.CallExpr); ok {
+			if fun, ok := call.Fun.(*ast.SelectorExpr); ok {
+				// funcName := fun.X.(*ast.Ident).String() + "." + fun.Sel.String() + "()"
+				if astid, ok := fun.X.(*ast.Ident); ok {
+					if astid.String() == "testing" && fun.Sel.String() == "Short" {
+						hasShortAtTop = true
+					}
+				}
+			}
+			if len(ifStmt.Body.List) > 0 {
+				if exprStmt, ok := ifStmt.Body.List[0].(*ast.ExprStmt); ok {
+					if call, ok := exprStmt.X.(*ast.CallExpr); ok {
+						if fun, ok := call.Fun.(*ast.SelectorExpr); ok {
+							// funcName := fun.X.(*ast.Ident).String() + "." + fun.Sel.String() + "()"
+							if astid, ok := fun.X.(*ast.Ident); ok {
+								if astid.String() == "t" && fun.Sel.String() == "Skip" {
+									hasSkipAtTop = true
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return hasShortAtTop && hasSkipAtTop
+}
+
+func (v *visitor) integTestCheckReport(pos token.Pos, testFunc *ast.FuncDecl) report {
+	return report{
+		pos,
+		fmt.Sprintf("%v:%v:%v:%s %s %s",
+			v.fs.Position(pos).Filename,
+			v.fs.Position(testFunc.Pos()).Line,
+			v.fs.Position(testFunc.Pos()).Column,
+			"Missing testing.Short() call and t.Skip() call at the beginning of",
+			TestTypeString[v.typeID], testFunc.Name.String()),
+	}
+}
+
+func newVisitor(fs *token.FileSet, testTypeID TestType) visitor {
 	return visitor{
-		fs: fs,
+		fs:     fs,
+		typeID: testTypeID,
 	}
 }
 
 type visitor struct {
 	reports reports
 	fs      *token.FileSet
+	typeID  TestType
 }
 
 /*
@@ -107,19 +180,19 @@ func (v *visitor) Visit(node ast.Node) ast.Visitor {
 
 	ce, ok := node.(*ast.CallExpr)
 	if ok {
-		if isInvalidCall(ce.Fun, "time", "Sleep") {
-			v.reports = append(v.reports, v.invalidCallReport(ce.Pos(), "time.Sleep()"))
-		} else if isInvalidCall(ce.Fun, "testing", "Short") {
-			v.reports = append(v.reports, v.invalidCallReport(ce.Pos(), "testing.Short()"))
+		for _, utci := range UnitTestCheckList {
+			if isInvalidCall(ce.Fun, utci) {
+				v.reports = append(v.reports, v.unitTestCheckReport(ce.Pos(), utci))
+			}
 		}
 	}
 
 	return v
 }
 
-func isInvalidCall(expr ast.Expr, pkgName, methodName string) bool {
+func isInvalidCall(expr ast.Expr, utci UnitTestCheckItem) bool {
 	sel, ok := expr.(*ast.SelectorExpr)
-	return ok && isIdent(sel.X, pkgName) && isIdent(sel.Sel, methodName)
+	return ok && isIdent(sel.X, utci.pkgName) && isIdent(sel.Sel, utci.mName)
 }
 
 func isIdent(expr ast.Expr, ident string) bool {
@@ -127,14 +200,14 @@ func isIdent(expr ast.Expr, ident string) bool {
 	return ok && id.Name == ident
 }
 
-func (v *visitor) invalidCallReport(pos token.Pos, pkgMethodName string) report {
+func (v *visitor) unitTestCheckReport(pos token.Pos, utci UnitTestCheckItem) report {
 	return report{
 		pos,
 		fmt.Sprintf("%v:%v:%v:%s",
 			v.fs.Position(pos).Filename,
 			v.fs.Position(pos).Line,
 			v.fs.Position(pos).Column,
-			"invalid " + pkgMethodName + " call in unit tests."),
+			"invalid "+utci.pkgName+"."+utci.mName+"() call in "+TestTypeString[v.typeID]),
 	}
 }
 
