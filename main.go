@@ -161,9 +161,14 @@ func scanMandatoryFunctionCallInTest(v *visitor, pkg *ast.Package) {
 
 // hasMandatoryCall examines the mandatory function call in a function of the form TestXxx.
 // Currently we check the following calls.
+// case 1:
 //if testing.Short() {
 //	t.Skip("skipping uint test in short mode.")
 //}
+// case 2:
+// if !testing.Short() {
+// ...
+// }
 func hasMandatoryCall(stmt ast.Stmt) bool {
 	hasShortAtTop := false
 	hasSkipAtTop := false
@@ -187,6 +192,17 @@ func hasMandatoryCall(stmt ast.Stmt) bool {
 									hasSkipAtTop = true
 								}
 							}
+						}
+					}
+				}
+			}
+		} else if uExpr, ok := ifStmt.Cond.(*ast.UnaryExpr); ok {
+			if call, ok := uExpr.X.(*ast.CallExpr); ok && uExpr.Op == token.NOT {
+				if fun, ok := call.Fun.(*ast.SelectorExpr); ok {
+					if astid, ok := fun.X.(*ast.Ident); ok {
+						if astid.String() == "testing" && fun.Sel.String() == "Short" {
+							hasShortAtTop = true
+							hasSkipAtTop = true
 						}
 					}
 				}
