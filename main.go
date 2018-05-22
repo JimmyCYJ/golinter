@@ -47,12 +47,18 @@ func doAllDirs(args []string) []string {
 		// Is it a directory?
 		if fi, err := os.Stat(name); err == nil && fi.IsDir() {
 			err := filepath.Walk(name, func(path string, info os.FileInfo, err error) error {
+				//log.Printf("filepath.Walk path: %q", path)
 				if err != nil {
 					reportErr(fmt.Sprintf("prevent panic by handling failure accessing a path %q: %v\n", path, err))
 					return err
 				}
 				if info.IsDir() {
-					if strings.HasSuffix(info.Name(), "e2e") {
+					//if strings.HasSuffix(info.Name(), "e2e") {
+					//	for _, r := range doE2eDir(path) {
+					//		reports = append(reports, r.msg)
+					//	}
+					//}
+					if isE2eTestPath(path) {
 						for _, r := range doE2eDir(path) {
 							reports = append(reports, r.msg)
 						}
@@ -72,6 +78,17 @@ func doAllDirs(args []string) []string {
 		}
 	}
 	return reports
+}
+
+// isE2eTestPath returns true if path is a sub directory in e2e test folders. e.g. e2e/foo/bar/...
+func isE2eTestPath(path string) bool {
+	subdirs := strings.Split(path, "/")
+	for _, subdir := range subdirs {
+		if subdir == "e2e" {
+			return true
+		}
+	}
+	return false
 }
 
 func doDir(path string) reports {
@@ -143,6 +160,10 @@ func scanMandatoryFunctionCallInTest(v *visitor, pkg *ast.Package) {
 }
 
 // hasMandatoryCall examines the mandatory function call in a function of the form TestXxx.
+// Currently we check the following calls.
+//if testing.Short() {
+//	t.Skip("skipping uint test in short mode.")
+//}
 func hasMandatoryCall(stmt ast.Stmt) bool {
 	hasShortAtTop := false
 	hasSkipAtTop := false
